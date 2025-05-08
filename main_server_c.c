@@ -31,6 +31,7 @@ typedef struct _USR
 USR *head = NULL;
 USR *tail = NULL;
 
+void send_join_message(USR *new_user); //print join message
 void print_client_list(); //recommended addition
 void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username);
 void broadcast(int fromfd, char *message);
@@ -79,6 +80,8 @@ int main(int argc, char *argv[])
         pthread_mutex_unlock(&client_list_mutex);
 
         printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
+        USR *new_user = tail;
+        send_join_message(new_user);  // Send the join message to all clients
 
         // Print updated client list
         pthread_mutex_lock(&client_list_mutex);
@@ -126,35 +129,31 @@ void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username
         tail = new_node;
     }
 }
+
 void broadcast(int fromfd, char *message)
 {
-    // figure out sender address
-    struct sockaddr_in cliaddr;
-    socklen_t clen = sizeof(cliaddr);
-    if (getpeername(fromfd, (struct sockaddr *)&cliaddr, &clen) < 0)
-        error("ERROR Unknown sender!");
-
     // traverse through all connected clients
     pthread_mutex_lock(&client_list_mutex);
     USR *cur = head;
     while (cur != NULL)
     {
-        if (cur->clisockfd != fromfd)
+        // Don't send message back to the sender (only if fromfd is not -1)
+        if (fromfd != -1 && cur->clisockfd != fromfd)
         {
             char buffer[512];
-            // sprintf(buffer, "[%s]:%s", inet_ntoa(cliaddr.sin_addr), message);
-            // Find the sender's username
-            char sender_name[NAME_LEN] = "Unknown";
-            USR *temp = head;
-            while (temp != NULL) {
-                if (temp->clisockfd == fromfd) {
-                    strncpy(sender_name, temp->username, NAME_LEN);
-                    break;
-                }
-                temp = temp->next;
-            }
+            sprintf(buffer, "%s", message);
 
-            sprintf(buffer, "[%s | %s]: %s", sender_name, inet_ntoa(cliaddr.sin_addr), message);
+            int nmsg = strlen(buffer);
+            int nsen = send(cur->clisockfd, buffer, nmsg, 0);
+            if (nsen != nmsg)
+                perror("ERROR send() failed");
+        }
+
+        // send message to all clients
+        if (fromfd == -1)
+        {
+            char buffer[512];
+            sprintf(buffer, "%s", message);
 
             int nmsg = strlen(buffer);
             int nsen = send(cur->clisockfd, buffer, nmsg, 0);
@@ -165,6 +164,7 @@ void broadcast(int fromfd, char *message)
     }
     pthread_mutex_unlock(&client_list_mutex);
 }
+
 
 void *thread_main(void *args)
 {
@@ -247,3 +247,18 @@ void print_client_list()
     }
     printf("=========================\n");
 }
+
+void send_join_message(USR *new_user)
+{
+    // Format the join message
+    char join_msg[256];
+    snprintf(join_msg, sizeof(join_msg), "[Server]: %s (%s) has joined the chat!", new_user->username, inet_ntoa(new_user->cli_addr.sin_addr));
+
+    // Debug: Print the join message to ensure it's correct
+    printf("Join Message: %s\n", join_msg);
+
+    // Broadcast the message to all clients
+    broadcast(-1, join_msg);  // -1 indicates it's a system message (join)
+}
+
+

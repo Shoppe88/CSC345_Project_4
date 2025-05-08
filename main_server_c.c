@@ -1,0 +1,249 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+
+#define PORT_NUM 1024
+#define MAX_CLIENTS 100
+#define NAME_LEN 50
+
+pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void error(const char *msg)
+{
+    perror(msg);
+    exit(1);
+}
+
+typedef struct _USR
+{
+    int clisockfd;
+    struct sockaddr_in cli_addr; //added change
+    char username[NAME_LEN]; // username
+    struct _USR *next;
+} USR;
+
+USR *head = NULL;
+USR *tail = NULL;
+
+void print_client_list(); //recommended addition
+void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username);
+void broadcast(int fromfd, char *message);
+void *thread_main(void *args);
+
+int main(int argc, char *argv[])
+{
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+        error("ERROR opening socket");
+
+    struct sockaddr_in serv_addr;
+    socklen_t slen = sizeof(serv_addr);
+    memset((char *)&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+    serv_addr.sin_port = htons(PORT_NUM);
+
+    int status = bind(sockfd,
+                      (struct sockaddr *)&serv_addr, slen);
+    if (status < 0)
+        error("ERROR on binding");
+
+    listen(sockfd, 5);
+
+    while (1)
+    {
+        struct sockaddr_in cli_addr;
+        socklen_t clen = sizeof(cli_addr);
+        int newsockfd = accept(sockfd,
+                               (struct sockaddr *)&cli_addr, &clen);
+        if (newsockfd < 0)
+            error("ERROR on accept");
+
+        char username[NAME_LEN] = {0};
+        int uname_len = recv(newsockfd, username, NAME_LEN - 1, 0);
+        if (uname_len <= 0)
+        {
+            close(newsockfd);
+            continue;
+        }
+        username[uname_len] = '\0';
+
+        pthread_mutex_lock(&client_list_mutex);
+        add_tail(newsockfd, cli_addr, username);
+        pthread_mutex_unlock(&client_list_mutex);
+
+        printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
+
+        // Print updated client list
+        pthread_mutex_lock(&client_list_mutex);
+        print_client_list();
+        pthread_mutex_unlock(&client_list_mutex);
+
+        // prepare USR structure to pass client socket
+        USR *args = (USR *)malloc(sizeof(USR));
+        if (args == NULL)
+            error("ERROR creating thread argument");
+
+        args->clisockfd = newsockfd;
+        args->cli_addr = cli_addr; //recommended addtion
+        strncpy(args->username, username, NAME_LEN);
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, thread_main, (void *)args) != 0)
+            error("ERROR creating a new thread");
+    }
+
+    return 0;
+}
+
+void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username)
+{
+    USR *new_node = (USR *)malloc(sizeof(USR));
+    //error check recommended to handle edge cases
+    if (!new_node)
+        error("ERROR allocating memory for client node");
+    
+    //recommened adding new nodes when a new client 
+    new_node->clisockfd = newclisockfd;
+    new_node->cli_addr = cliaddr;
+    strncpy(new_node->username, username, NAME_LEN);
+    new_node->username[NAME_LEN - 1] = '\0';
+    new_node->next = NULL;
+
+    if (head == NULL)
+    {
+        head = tail = new_node;
+    }
+    else
+    {
+        tail->next = new_node;
+        tail = new_node;
+    }
+}
+void broadcast(int fromfd, char *message)
+{
+    // figure out sender address
+    struct sockaddr_in cliaddr;
+    socklen_t clen = sizeof(cliaddr);
+    if (getpeername(fromfd, (struct sockaddr *)&cliaddr, &clen) < 0)
+        error("ERROR Unknown sender!");
+
+    // traverse through all connected clients
+    pthread_mutex_lock(&client_list_mutex);
+    USR *cur = head;
+    while (cur != NULL)
+    {
+        if (cur->clisockfd != fromfd)
+        {
+            char buffer[512];
+            // sprintf(buffer, "[%s]:%s", inet_ntoa(cliaddr.sin_addr), message);
+            // Find the sender's username
+            char sender_name[NAME_LEN] = "Unknown";
+            USR *temp = head;
+            while (temp != NULL) {
+                if (temp->clisockfd == fromfd) {
+                    strncpy(sender_name, temp->username, NAME_LEN);
+                    break;
+                }
+                temp = temp->next;
+            }
+
+            sprintf(buffer, "[%s | %s]: %s", sender_name, inet_ntoa(cliaddr.sin_addr), message);
+
+            int nmsg = strlen(buffer);
+            int nsen = send(cur->clisockfd, buffer, nmsg, 0);
+            if (nsen != nmsg)
+                perror("ERROR send() failed");
+        }
+        cur = cur->next;
+    }
+    pthread_mutex_unlock(&client_list_mutex);
+}
+
+void *thread_main(void *args)
+{
+    // make sure thread resources are deallocated upon return
+    pthread_detach(pthread_self());
+
+    // get socket descriptor from argument
+    int clisockfd = ((USR *)args)->clisockfd;
+    struct sockaddr_in cli_addr = ((USR *)args)->cli_addr;
+    free(args);
+
+    //-------------------------------
+    // Now, we receive/send messages
+    char buffer[256];
+    int nrcv;
+
+    while ((nrcv = recv(clisockfd, buffer, 256, 0)) > 0)
+    {
+        buffer[nrcv] = '\0';
+        broadcast(clisockfd, buffer);
+    }
+    if (nrcv < 0)
+        error("ERROR recv() failed");
+
+    char username[NAME_LEN];
+    strncpy(username, ((USR *)args)->username, NAME_LEN);
+    username[NAME_LEN - 1] = '\0'; 
+
+    shutdown(clisockfd, SHUT_RDWR);
+    close(clisockfd);
+
+    // Remove client from list
+    pthread_mutex_lock(&client_list_mutex);
+    USR *prev = NULL;
+    USR *cur = head;
+
+    while (cur != NULL)
+    {
+        if (cur->clisockfd == clisockfd)
+        {
+            if (prev == NULL)
+            { // head removal
+                head = cur->next;
+                if (cur == tail)
+                    tail = NULL;
+            }
+            else
+            {
+                prev->next = cur->next;
+                if (cur == tail)
+                    tail = prev;
+            }
+            free(cur);
+            break;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    pthread_mutex_unlock(&client_list_mutex);
+
+    pthread_mutex_lock(&client_list_mutex); //recommended additon
+    print_client_list();
+    pthread_mutex_unlock(&client_list_mutex);
+
+    return NULL;
+}
+
+void print_client_list()
+{
+    printf("=== Connected clients ===\n");
+    USR *cur = head;
+    while (cur != NULL)
+    {
+        printf("%s:%d\n", inet_ntoa(cur->cli_addr.sin_addr), ntohs(cur->cli_addr.sin_port));
+        cur = cur->next;
+    }
+    if (head == NULL)
+    {
+        printf("(no clients connected)\n");
+    }
+    printf("=========================\n");
+}

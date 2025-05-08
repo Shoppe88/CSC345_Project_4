@@ -89,8 +89,17 @@ int main(int argc, char *argv[])
 
 	printf("Try connecting to %s...\n", inet_ntoa(serv_addr.sin_addr));
 
-	int status = connect(sockfd, 
-			(struct sockaddr *) &serv_addr, slen);
+	int status = connect(sockfd,
+        (struct sockaddr *) &serv_addr, slen);
+
+    char username[50];
+    printf("Enter your username: ");
+    fgets(username, sizeof(username), stdin);
+    username[strcspn(username, "\n")] = '\0'; // remove newline character
+
+    if (send(sockfd, username, strlen(username), 0) < 0)
+        error("ERROR sending username to server");
+
 	if (status < 0) error("ERROR connecting");
 
 	pthread_t tid1;

@@ -8,8 +8,9 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
-#define PORT_NUM 1004
+#define PORT_NUM 1024
 #define MAX_CLIENTS 100
+#define NAME_LEN 50
 
 pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -23,6 +24,7 @@ typedef struct _USR
 {
     int clisockfd;
     struct sockaddr_in cli_addr; //added change
+    char username[NAME_LEN]; // username
     struct _USR *next;
 } USR;
 
@@ -30,7 +32,7 @@ USR *head = NULL;
 USR *tail = NULL;
 
 void print_client_list(); //recommended addition
-void add_tail(int newclisockfd, struct sockaddr_in cliaddr);
+void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username);
 void broadcast(int fromfd, char *message);
 void *thread_main(void *args);
 
@@ -62,8 +64,18 @@ int main(int argc, char *argv[])
                                (struct sockaddr *)&cli_addr, &clen);
         if (newsockfd < 0)
             error("ERROR on accept");
-        pthread_mutex_lock(&client_list_mutex);//recommended addtion
-        add_tail(newsockfd, cli_addr); //recommended addition
+
+        char username[NAME_LEN] = {0};
+        int uname_len = recv(newsockfd, username, NAME_LEN - 1, 0);
+        if (uname_len <= 0)
+        {
+            close(newsockfd);
+            continue;
+        }
+        username[uname_len] = '\0';
+
+        pthread_mutex_lock(&client_list_mutex);
+        add_tail(newsockfd, cli_addr, username);
         pthread_mutex_unlock(&client_list_mutex);
 
         printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
@@ -80,6 +92,7 @@ int main(int argc, char *argv[])
 
         args->clisockfd = newsockfd;
         args->cli_addr = cli_addr; //recommended addtion
+        strncpy(args->username, username, NAME_LEN);
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, thread_main, (void *)args) != 0)
@@ -89,7 +102,7 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-void add_tail(int newclisockfd, struct sockaddr_in cliaddr)
+void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username)
 {
     USR *new_node = (USR *)malloc(sizeof(USR));
     //error check recommended to handle edge cases
@@ -99,6 +112,8 @@ void add_tail(int newclisockfd, struct sockaddr_in cliaddr)
     //recommened adding new nodes when a new client 
     new_node->clisockfd = newclisockfd;
     new_node->cli_addr = cliaddr;
+    strncpy(new_node->username, username, NAME_LEN);
+    new_node->username[NAME_LEN - 1] = '\0';
     new_node->next = NULL;
 
     if (head == NULL)
@@ -111,7 +126,6 @@ void add_tail(int newclisockfd, struct sockaddr_in cliaddr)
         tail = new_node;
     }
 }
-
 void broadcast(int fromfd, char *message)
 {
     // figure out sender address
@@ -128,7 +142,20 @@ void broadcast(int fromfd, char *message)
         if (cur->clisockfd != fromfd)
         {
             char buffer[512];
-            sprintf(buffer, "[%s]:%s", inet_ntoa(cliaddr.sin_addr), message);
+            // sprintf(buffer, "[%s]:%s", inet_ntoa(cliaddr.sin_addr), message);
+            // Find the sender's username
+            char sender_name[NAME_LEN] = "Unknown";
+            USR *temp = head;
+            while (temp != NULL) {
+                if (temp->clisockfd == fromfd) {
+                    strncpy(sender_name, temp->username, NAME_LEN);
+                    break;
+                }
+                temp = temp->next;
+            }
+
+            sprintf(buffer, "[%s | %s]: %s", sender_name, inet_ntoa(cliaddr.sin_addr), message);
+
             int nmsg = strlen(buffer);
             int nsen = send(cur->clisockfd, buffer, nmsg, 0);
             if (nsen != nmsg)
@@ -162,14 +189,12 @@ void *thread_main(void *args)
     if (nrcv < 0)
         error("ERROR recv() failed");
 
+    char username[NAME_LEN];
+    strncpy(username, ((USR *)args)->username, NAME_LEN);
+    username[NAME_LEN - 1] = '\0'; 
+
     shutdown(clisockfd, SHUT_RDWR);
     close(clisockfd);
-
-    char joinmsg[256];
-    snprintf(joinmsg, sizeof(joinmsg), "%s%s (%s) joined the chat room!\n\033[0m",
-             self->color, self->name, inet_ntoa(self->addr.sin_addr));
-    printf("%s", joinmsg);
-    broadcast(clisockfd, joinmsg);
 
     // Remove client from list
     pthread_mutex_lock(&client_list_mutex);
@@ -203,14 +228,6 @@ void *thread_main(void *args)
     pthread_mutex_lock(&client_list_mutex); //recommended additon
     print_client_list();
     pthread_mutex_unlock(&client_list_mutex);
-
-    /* Message for someone leaving the chat, building off the logic that the AI provided me before in the ANNOUNCE JOIN section, which
-       made this part much easier - Tom*/
-    char leavemsg[256];
-    snprintf(leavemsg, sizeof(leavemsg), "%s%s (%s) left the room!\n\033[0m",
-             self->color, self->name, inet_ntoa(self->addr.sin_addr));
-    printf("%s", leavemsg);
-    broadcast(clisockfd, leavemsg);
 
     return NULL;
 }

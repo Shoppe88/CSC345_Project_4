@@ -8,8 +8,12 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
-#define PORT_NUM 5000 /* [AI] I was runnning into a lot of issues of not being able to get the server to run, so when i showed \
-                       AI my code it said, if I change the port number from 1004 to 5000 I should be able to run my server*/
+#define PORT_NUM 5000   /* [AI] I was runnning into a lot of issues of not being able to get the server to run, so when i showed \
+                     AI my code it said, if I change the port number from 1004 to 5000 I should be able to run my server*/
+#define MAX_CLIENTS 100 // [AI] Added to set a limit for client list handling
+
+pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER; // [AI] Used for thread-safe client list access
+
 void error(const char *msg)
 {
     perror(msg);
@@ -24,7 +28,7 @@ typedef struct _USR
     /*Username and color*/
     char name[50];
     char color[10];
-    struct sockaddr_in addr;
+    struct sockaddr_in addr; // [AI] Needed for printing client IP and join/leave announcements
 } USR;
 
 USR *head = NULL;
@@ -38,38 +42,56 @@ const char *colors[] = {
     "\033[0;94m"};
 int color_index = 0;
 
-void add_tail(int newclisockfd, struct sockaddr_in cli_addr)
+void print_client_list() // [AI] Used to debug and visualize current connections
 {
+    printf("=== Connected clients ===\n");
+    USR *cur = head;
+    while (cur != NULL)
+    {
+        printf("%s:%d\n", inet_ntoa(cur->addr.sin_addr), ntohs(cur->addr.sin_port));
+        cur = cur->next;
+    }
     if (head == NULL)
     {
-        head = (USR *)malloc(sizeof(USR));
-        head->clisockfd = newclisockfd;
-        head->next = NULL;
-        head->addr = cli_addr;
-        snprintf(head->color, sizeof(head->color), "%s", colors[color_index++ % 10]); /*[AI] When given the skeleton code and the objective of
-                                                                                        assigning a color to a user, it recommeneded I use
-                                                                                        this line of code shown to rotate through a list of
-                                                                                        ANSI color codes */
-        tail = head;
+        printf("(no clients connected)\n");
+    }
+    printf("=========================\n");
+}
+
+void add_tail(int newclisockfd, struct sockaddr_in cli_addr)
+{
+    USR *new_node = (USR *)malloc(sizeof(USR));
+    if (!new_node)
+        error("ERROR allocating memory for client node");
+
+    new_node->clisockfd = newclisockfd;
+    new_node->addr = cli_addr;
+    snprintf(new_node->color, sizeof(new_node->color), "%s", colors[color_index++ % 10]); /*[AI] Assign rotating color to each user*/
+    new_node->next = NULL;
+
+    if (head == NULL)
+    {
+        head = tail = new_node;
     }
     else
     {
-        tail->next = (USR *)malloc(sizeof(USR));
-        tail->next->clisockfd = newclisockfd;
-        tail->next->next = NULL;
-        tail->next->addr = cli_addr;
-        snprintf(tail->next->color, sizeof(tail->next->color), "%s", colors[color_index++ % 10]); /* [AI] same logic and structure that was
-                                                                                                    provided by AI as before */
-        tail = tail->next;
+        tail->next = new_node;
+        tail = new_node;
     }
 }
 
 void broadcast(int fromfd, char *message)
 {
+    pthread_mutex_lock(&client_list_mutex);
+
     struct sockaddr_in cliaddr;
     socklen_t clen = sizeof(cliaddr);
     if (getpeername(fromfd, (struct sockaddr *)&cliaddr, &clen) < 0)
         error("ERROR Unknown sender!");
+
+    USR *sender = head;
+    while (sender != NULL && sender->clisockfd != fromfd)
+        sender = sender->next;
 
     USR *cur = head;
     while (cur != NULL)
@@ -77,30 +99,20 @@ void broadcast(int fromfd, char *message)
         if (cur->clisockfd != fromfd)
         {
             char buffer[512];
-
-            USR *sender = head;
-            while (sender != NULL && sender->clisockfd != fromfd)
-                sender = sender->next;
-
-            /*[AI] when speaking with the AI, I brought up the question "How could I go about possibly structuring my broadcast function
-            so that each message sent to other clients includes the sender's username in color. And for the condition of nothing being sent
-            it should fall back to the IP address" and it recommended the following if-else statement, which seems to work good*/
             if (sender && strlen(sender->name) > 0)
-            {
-                snprintf(buffer, sizeof(buffer), "%s[%s] %s\033[0m", sender->color, sender->name, message);
-            }
+                snprintf(buffer, sizeof(buffer), "%s[%s] %s\033[0m", sender->color, sender->name, message); /*[AI] Username + color formatting*/
             else
-            {
                 snprintf(buffer, sizeof(buffer), "[%s]:%s", inet_ntoa(cliaddr.sin_addr), message);
-            }
 
             int nmsg = strlen(buffer);
             int nsen = send(cur->clisockfd, buffer, nmsg, 0);
             if (nsen != nmsg)
-                error("ERROR send() failed");
+                perror("ERROR send() failed");
         }
         cur = cur->next;
     }
+
+    pthread_mutex_unlock(&client_list_mutex);
 }
 
 typedef struct _ThreadArgs
@@ -117,56 +129,87 @@ void *thread_main(void *args)
 
     char buffer[256];
     int nrcv;
+    int message_count = 0; /*[AI] Track how many messages a client sends before disconnecting*/
 
-    /*Finding the user*/
+    pthread_mutex_lock(&client_list_mutex);
     USR *self = head;
     while (self != NULL && self->clisockfd != clisockfd)
         self = self->next;
+    pthread_mutex_unlock(&client_list_mutex);
 
-    /*[AI] I gave the skeleton code to the AI and simply asked "How can you recieve the client's username right after they connect
-    and store it?" When asked this  it gave me the recommendation of using recv() to recieve the username from the socket and store it in the
-    USR struct that was proivided. it stressed to me to aslo use memset to clear the buffer to avoid bad data*/
+    if (self == NULL)
+    {
+        close(clisockfd);
+        return NULL; /*[AI] Prevent crash if client wasn't properly registered*/
+    }
+
     memset(self->name, 0, sizeof(self->name));
     nrcv = recv(clisockfd, self->name, sizeof(self->name) - 1, 0);
 
-    /*checking return value for quick handling*/
     if (nrcv <= 0)
     {
         close(clisockfd);
         return NULL;
     }
 
-    /*[AI] During the coding process I was stumped at how I could send a message to all connected clients when a new user joins
-      It said exactly, "You can generate a formatted join message using snprintf with ANSI color codes and the clients stored username and IP."
-      and then showed me an example of a line of code structered like lines 125 and 126*/
     char joinmsg[256];
     snprintf(joinmsg, sizeof(joinmsg), "%s%s (%s) joined the chat room!\n\033[0m",
              self->color, self->name, inet_ntoa(self->addr.sin_addr));
     printf("%s", joinmsg);
     broadcast(clisockfd, joinmsg);
 
-    nrcv = recv(clisockfd, buffer, 255, 0);
-    if (nrcv < 0)
-        error("ERROR recv() failed");
-
-    while (nrcv > 0)
+    while ((nrcv = recv(clisockfd, buffer, 255, 0)) > 0)
     {
+        buffer[nrcv] = '\0';
         broadcast(clisockfd, buffer);
-
-        nrcv = recv(clisockfd, buffer, 255, 0);
-        if (nrcv < 0)
-            error("ERROR recv() failed");
+        message_count++;
     }
 
-    /* Message for someone leaving the chat, building off the logic that the AI provided me before in the ANNOUNCE JOIN section, which
-       made this part much easier*/
-    char leavemsg[256];
-    snprintf(leavemsg, sizeof(leavemsg), "%s%s (%s) left the room!\n\033[0m",
-             self->color, self->name, inet_ntoa(self->addr.sin_addr));
-    printf("%s", leavemsg);
-    broadcast(clisockfd, leavemsg);
+    if (nrcv < 0)
+        perror("ERROR recv() failed");
 
+    if (message_count > 0)
+    {
+        char leavemsg[256];
+        snprintf(leavemsg, sizeof(leavemsg), "%s%s (%s) left the room!\n\033[0m",
+                 self->color, self->name, inet_ntoa(self->addr.sin_addr));
+        printf("%s", leavemsg);
+        broadcast(clisockfd, leavemsg);
+    }
+
+    shutdown(clisockfd, SHUT_RDWR);
     close(clisockfd);
+
+    pthread_mutex_lock(&client_list_mutex);
+    USR *prev = NULL, *cur = head;
+    while (cur != NULL)
+    {
+        if (cur->clisockfd == clisockfd)
+        {
+            if (prev == NULL)
+            {
+                head = cur->next;
+                if (cur == tail)
+                    tail = NULL;
+            }
+            else
+            {
+                prev->next = cur->next;
+                if (cur == tail)
+                    tail = prev;
+            }
+            free(cur);
+            break;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    pthread_mutex_unlock(&client_list_mutex);
+
+    pthread_mutex_lock(&client_list_mutex);
+    print_client_list();
+    pthread_mutex_unlock(&client_list_mutex);
+
     return NULL;
 }
 
@@ -200,9 +243,15 @@ int main(int argc, char *argv[])
             error("ERROR on accept");
 
         printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
-        add_tail(newsockfd, cli_addr); /*[AI] when trouble shooting my code, AI pointed out that if I left the cli_addr
-                                        out of this, I could possibly run into problems of not being able to store the
-                                        correct IP address or crash, so I added cli_addr as per its recommendation*/
+
+        pthread_mutex_lock(&client_list_mutex);
+        add_tail(newsockfd, cli_addr);
+        pthread_mutex_unlock(&client_list_mutex);
+
+        pthread_mutex_lock(&client_list_mutex);
+        print_client_list();
+        pthread_mutex_unlock(&client_list_mutex);
+
         ThreadArgs *args = (ThreadArgs *)malloc(sizeof(ThreadArgs));
         if (args == NULL)
             error("ERROR creating thread argument");

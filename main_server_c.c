@@ -32,6 +32,7 @@ USR *head = NULL;
 USR *tail = NULL;
 
 void send_join_message(USR *new_user); //print join message
+void send_leave_message(USR *leaving_user);//print leave message
 void print_client_list(); //recommended addition
 void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username);
 void broadcast(int fromfd, char *message);
@@ -196,6 +197,12 @@ void *thread_main(void *args)
     shutdown(clisockfd, SHUT_RDWR);
     close(clisockfd);
 
+    // Send leave message before removing from list
+    char leave_msg[256];
+    snprintf(leave_msg, sizeof(leave_msg), "[Server]: %s (%s) has left the chat!",
+            username, inet_ntoa(cli_addr.sin_addr));
+    broadcast(-1, leave_msg);
+
     // Remove client from list
     pthread_mutex_lock(&client_list_mutex);
     USR *prev = NULL;
@@ -259,6 +266,14 @@ void send_join_message(USR *new_user)
 
     // Broadcast the message to all clients
     broadcast(-1, join_msg);  // -1 indicates it's a system message (join)
+}
+
+void send_leave_message(USR *leaving_user)
+{
+    char leave_msg[256];
+    snprintf(leave_msg, sizeof(leave_msg), "[Server]: %s (%s) has left the chat!",
+             leaving_user->username, inet_ntoa(leaving_user->cli_addr.sin_addr));
+    broadcast(-1, leave_msg);
 }
 
 

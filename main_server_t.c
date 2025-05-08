@@ -118,11 +118,6 @@ void *thread_main(void *args)
     char buffer[256];
     int nrcv;
 
-    /*Finding the user*/
-    USR *self = head;
-    while (self != NULL && self->clisockfd != clisockfd)
-        self = self->next;
-
     /*[AI] I gave the skeleton code to the AI and simply asked "How can you recieve the client's username right after they connect
     and store it?" When asked this  it gave me the recommendation of using recv() to recieve the username from the socket and store it in the
     USR struct that was proivided. it stressed to me to aslo use memset to clear the buffer to avoid bad data*/

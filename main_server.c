@@ -111,6 +111,7 @@ void add_tail(int newclisockfd, struct sockaddr_in cliaddr)
         tail = new_node;
     }
 }
+
 void broadcast(int fromfd, char *message)
 {
     // figure out sender address
@@ -164,6 +165,12 @@ void *thread_main(void *args)
     shutdown(clisockfd, SHUT_RDWR);
     close(clisockfd);
 
+    char joinmsg[256];
+    snprintf(joinmsg, sizeof(joinmsg), "%s%s (%s) joined the chat room!\n\033[0m",
+             self->color, self->name, inet_ntoa(self->addr.sin_addr));
+    printf("%s", joinmsg);
+    broadcast(clisockfd, joinmsg);
+
     // Remove client from list
     pthread_mutex_lock(&client_list_mutex);
     USR *prev = NULL;
@@ -196,6 +203,14 @@ void *thread_main(void *args)
     pthread_mutex_lock(&client_list_mutex); //recommended additon
     print_client_list();
     pthread_mutex_unlock(&client_list_mutex);
+
+    /* Message for someone leaving the chat, building off the logic that the AI provided me before in the ANNOUNCE JOIN section, which
+       made this part much easier - Tom*/
+    char leavemsg[256];
+    snprintf(leavemsg, sizeof(leavemsg), "%s%s (%s) left the room!\n\033[0m",
+             self->color, self->name, inet_ntoa(self->addr.sin_addr));
+    printf("%s", leavemsg);
+    broadcast(clisockfd, leavemsg);
 
     return NULL;
 }

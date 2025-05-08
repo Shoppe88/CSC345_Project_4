@@ -5,10 +5,10 @@ all:
 	gcc -o chat_client_full chat_client_full.c -lpthread
 	gcc -o main_client main_client.c -lpthread
 	gcc -o main_server main_server.c -lpthread
-
+	gcc -o main_server_c main_server_c.c -lpthread
+	gcc -o main_client_c main_client_c.c
 clean:
 	rm chat_server chat_client
 	rm chat_server_full chat_client_full
 	rm main_server
-	rm main_server
-
+	rm main_server_c main_client_c

@@ -1,122 +1,83 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h> 
 #include <pthread.h>
 
 #define PORT_NUM 1024
-
-void error(const char *msg)
+void error(const char *m)
 {
-    perror(msg);
+    perror(m);
     exit(0);
 }
 
-typedef struct _ThreadArgs {
-    int clisockfd;
-} ThreadArgs;
-
-void* thread_main_recv(void* args)
+static void *recv_thread(void *arg)
 {
+    int sockfd = *(int *)arg;
     pthread_detach(pthread_self());
-
-    int sockfd = ((ThreadArgs*) args)->clisockfd;
-    free(args);
-
-    // keep receiving and displaying message from server
-    char buffer[512];
+    char buf[512];
     int n;
-
-    n = recv(sockfd, buffer, 512, 0);
-    while (n > 0) {
-        memset(buffer, 0, 512);
-        n = recv(sockfd, buffer, 512, 0);
-        if (n < 0) error("ERROR recv() failed");
-
-        printf("\n%s\n", buffer);
+    while ((n = recv(sockfd, buf, 511, 0)) > 0)
+    {
+        buf[n] = '\0';
+        printf("\n%s\n", buf);
     }
-
-    return NULL;
-}
-
-void* thread_main_send(void* args)
-{
-    pthread_detach(pthread_self());
-
-    int sockfd = ((ThreadArgs*) args)->clisockfd;
-    free(args);
-
-    // keep sending messages to the server
-    char buffer[256];
-    int n;
-
-    while (1) {
-        // You will need a bit of control on your terminal
-        // console or GUI to have a nice input window.
-        //printf("\nPlease enter the message: ");
-        memset(buffer, 0, 256);
-        fgets(buffer, 255, stdin);
-
-        if (strlen(buffer) == 1) buffer[0] = '\0';
-
-        n = send(sockfd, buffer, strlen(buffer), 0);
-        if (n < 0) error("ERROR writing to socket");
-
-        if (n == 0) break; // we stop transmission when user type empty string
-    }
-
+    exit(0);
     return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-    if (argc < 2) error("Please specify hostname");
-
+    if (argc < 2)
+        error("usage: client <server_ip>");
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) error("ERROR opening socket");
-
-    struct sockaddr_in serv_addr;
-    socklen_t slen = sizeof(serv_addr);
-    memset((char*) &serv_addr, 0, sizeof(serv_addr));
+    if (sockfd < 0)
+        error("socket");
+    struct sockaddr_in serv_addr = {0};
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = inet_addr(argv[1]);
     serv_addr.sin_port = htons(PORT_NUM);
+    printf("Connecting to %s...\n", inet_ntoa(serv_addr.sin_addr));
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+        error("connect");
 
-    printf("Try connecting to %s...\n", inet_ntoa(serv_addr.sin_addr));
+    /* ---------- handle username + room prompts ---------- */
+    char line[64];
+    int n = recv(sockfd, line, 63, 0);
+    if (n <= 0)
+        error("recv");
+    line[n] = '\0';
+    printf("%s", line);
+    fgets(line, 63, stdin);
+    send(sockfd, line, strlen(line), 0);
+    n = recv(sockfd, line, 63, 0);
+    if (n <= 0)
+        error("recv");
+    line[n] = '\0';
+    printf("%s", line);
+    fgets(line, 63, stdin);
+    send(sockfd, line, strlen(line), 0);
 
-    int status = connect(sockfd, (struct sockaddr *) &serv_addr, slen);
-    if (status < 0) error("ERROR connecting");
+    /* ---------- launch threads ---------- */
+    pthread_t rtid;
+    int *argfd = malloc(sizeof(int));
+    *argfd = sockfd;
+    pthread_create(&rtid, NULL, recv_thread, argfd);
 
-    char username[50];
-    printf("Enter your username: ");
-    fgets(username, sizeof(username), stdin);
-    username[strcspn(username, "\n")] = '\0';
-
-    if (send(sockfd, username, strlen(username), 0) < 0)
-        error("ERROR sending username to server");
-
-    pthread_t tid1;
-    pthread_t tid2;
-
-    ThreadArgs* args;
-
-    args = (ThreadArgs*) malloc(sizeof(ThreadArgs));
-    args->clisockfd = sockfd;
-    pthread_create(&tid1, NULL, thread_main_send, (void*) args);
-
-    args = (ThreadArgs*) malloc(sizeof(ThreadArgs));
-    args->clisockfd = sockfd;
-    pthread_create(&tid2, NULL, thread_main_recv, (void*) args);
-
-    // parent will wait for sender to finish (= user stop sending message and disconnect from server)
-    pthread_join(tid1, NULL);
-
+    char buf[256];
+    while (1)
+    {
+        fgets(buf, 255, stdin);
+        if (strcmp(buf, "\n") == 0)
+            buf[0] = '\0';
+        send(sockfd, buf, strlen(buf), 0);
+        if (buf[0] == '\0')
+            break;
+    }
     close(sockfd);
-
     return 0;
 }

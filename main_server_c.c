@@ -9,28 +9,14 @@
 #include <pthread.h>
 
 #define PORT_NUM 1024
-#define MAX_CLIENTS 100
-#define NAME_LEN 50
+#define CLR_RST "\033[0m"
+static const char *CLR[] = {/* 7 safe ANSI colours           */
+                            "\033[0;31m", "\033[0;32m", "\033[0;33m",
+                            "\033[0;34m", "\033[0;35m", "\033[0;36m",
+                            "\033[0;37m"};
+#define NCOL (sizeof(CLR) / sizeof(CLR[0]))
 
-#define NUM_COLORS (sizeof(colors) / sizeof(colors[0]))
-#define COLOR_RESET "\033[0m"
-
-const char *colors[] = {
-    "\033[31m", // red
-    "\033[32m", // green
-    "\033[33m", // yellow
-    "\033[34m", // blue
-    "\033[35m", // magenta
-    "\033[36m", // cyan
-    "\033[91m", // light red
-    "\033[92m", // light green
-    "\033[93m", // light yellow
-    "\033[94m", // light blue
-    "\033[95m", // light magenta
-    "\033[96m", // light cyan
-};
-
-pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int next_colour = 0; /* rotates through CLR[]         */
 
 void error(const char *msg)
 {
@@ -41,39 +27,145 @@ void error(const char *msg)
 typedef struct _USR
 {
     int clisockfd;
-    struct sockaddr_in cli_addr; //added change
-    char username[NAME_LEN]; // username
-    char color[16];  // ANSI color code string, e.g., "\033[31m"
+    struct sockaddr_in addr;
+    char username[32];
+    int colour; /* index into CLR[]              */
+    int room;   /* chat‑room number              */
     struct _USR *next;
 } USR;
 
-USR *head = NULL;
-USR *tail = NULL;
+static USR *head = NULL, *tail = NULL;
+static pthread_mutex_t list_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void send_join_message(USR *new_user); //print join message
-void send_leave_message(USR *leaving_user);//print leave message
-void print_client_list(); //recommended addition
-void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username);
-void broadcast(int fromfd, char *message);
-void *thread_main(void *args);
+/* ------------------------------------------------------------------ */
+static void add_tail(USR *u)
+{
+    pthread_mutex_lock(&list_lock);
+    if (!head)
+        head = tail = u;
+    else
+    {
+        tail->next = u;
+        tail = u;
+    }
+    pthread_mutex_unlock(&list_lock);
+}
 
-int main(int argc, char *argv[])
+static void remove_fd(int fd)
+{
+    pthread_mutex_lock(&list_lock);
+    USR *cur = head, *prev = NULL;
+    while (cur && cur->clisockfd != fd)
+    {
+        prev = cur;
+        cur = cur->next;
+    }
+    if (cur)
+    {
+        if (prev)
+            prev->next = cur->next;
+        else
+            head = cur->next;
+        if (cur == tail)
+            tail = prev;
+        free(cur);
+    }
+    pthread_mutex_unlock(&list_lock);
+}
+
+static USR *find_user(int fd)
+{
+    pthread_mutex_lock(&list_lock);
+    for (USR *c = head; c; c = c->next)
+        if (c->clisockfd == fd)
+        {
+            pthread_mutex_unlock(&list_lock);
+            return c;
+        }
+    pthread_mutex_unlock(&list_lock);
+    return NULL;
+}
+
+static void print_addr_list(void)
+{
+    pthread_mutex_lock(&list_lock);
+    printf("=== Connected clients ===\n");
+    for (USR *c = head; c; c = c->next)
+        printf("%s: %s\n", c->username[0]?c->username:"No Name",inet_ntoa(c->addr.sin_addr));
+    printf("=========================\n");
+    pthread_mutex_unlock(&list_lock);
+}
+
+static void broadcast_room(int room, int fromfd, const char *msg)
+{
+    pthread_mutex_lock(&list_lock);
+    USR *sender = NULL;
+    if (fromfd >= 0)
+        for (USR *c = head; c; c = c->next)
+            if (c->clisockfd == fromfd)
+            {
+                sender = c;
+                break;
+            }
+
+    for (USR *c = head; c; c = c->next)
+        if (c->room == room && c->clisockfd != fromfd)
+        {
+            char buf[600];
+            int n;
+            if (sender)
+                n = snprintf(buf, sizeof(buf), "%s%s%s: %s", CLR[sender->colour], sender->username, CLR_RST, msg);
+            else
+                n = snprintf(buf, sizeof(buf), "%s", msg);
+            send(c->clisockfd, buf, n, 0);
+        }
+    pthread_mutex_unlock(&list_lock);
+}
+
+/* ------------------------- thread routine -------------------------- */
+static void *thread_main(void *arg)
+{
+    int clisockfd = *(int *)arg;
+    free(arg);
+    pthread_detach(pthread_self());
+
+    char buf[256];
+    int n;
+    while ((n = recv(clisockfd, buf, 255, 0)) > 0)
+    {
+        buf[n] = '\0';
+        USR *u = find_user(clisockfd);
+        if (u)
+            broadcast_room(u->room, clisockfd, buf);
+    }
+
+    /* client disconnects */
+    USR *u = find_user(clisockfd); /* still valid until removed */
+    if (u)
+    {
+        char notice[64];
+        snprintf(notice, sizeof(notice), "%s has left the chat.\n", u->username);
+        broadcast_room(u->room, -1, notice);
+    }
+    close(clisockfd);
+    remove_fd(clisockfd);
+    print_addr_list();
+    return NULL;
+}
+
+/* ------------------------------ main ------------------------------ */
+int main(void)
 {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
-        error("ERROR opening socket");
+        error("opening socket");
 
-    struct sockaddr_in serv_addr;
-    socklen_t slen = sizeof(serv_addr);
-    memset((char *)&serv_addr, 0, sizeof(serv_addr));
+    struct sockaddr_in serv_addr = {0};
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = INADDR_ANY;
     serv_addr.sin_port = htons(PORT_NUM);
-
-    int status = bind(sockfd,
-                      (struct sockaddr *)&serv_addr, slen);
-    if (status < 0)
-        error("ERROR on binding");
+    if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+        error("binding");
 
     listen(sockfd, 5);
 
@@ -81,240 +173,85 @@ int main(int argc, char *argv[])
     {
         struct sockaddr_in cli_addr;
         socklen_t clen = sizeof(cli_addr);
-        int newsockfd = accept(sockfd,
-                               (struct sockaddr *)&cli_addr, &clen);
+        int newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clen);
         if (newsockfd < 0)
-            error("ERROR on accept");
+            error("accept");
+        printf("Connected: %s:%d\n", inet_ntoa(cli_addr.sin_addr),htons(PORT_NUM));
 
-        char username[NAME_LEN] = {0};
-        int uname_len = recv(newsockfd, username, NAME_LEN - 1, 0);
-        if (uname_len <= 0)
+        /* ---------- username handshake ---------- */
+        char uname[32] = {0};
+        send(newsockfd, "Choose a unique username: ", 27, 0);
+        if (recv(newsockfd, uname, 31, 0) <= 0)
         {
             close(newsockfd);
             continue;
         }
-        username[uname_len] = '\0';
+        uname[strcspn(uname, "\r\n")] = 0;
 
-        pthread_mutex_lock(&client_list_mutex);
-        add_tail(newsockfd, cli_addr, username);
-        pthread_mutex_unlock(&client_list_mutex);
+        /* check uniqueness */
+        int dup = 0;
+        pthread_mutex_lock(&list_lock);
+        for (USR *c = head; c; c = c->next)
+            if (!strcmp(c->username, uname))
+            {
+                dup = 1;
+                break;
+            }
+        pthread_mutex_unlock(&list_lock);
+        if (dup)
+        {
+            send(newsockfd, "Username taken. Disconnecting.\n", 32, 0);
+            close(newsockfd);
+            continue;
+        }
 
-        printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
-        USR *new_user = tail;
-        send_join_message(new_user);  // Send the join message to all clients
+        /* ---------- room handshake ---------- */
+        char rbuf[16] = {0};
+        send(newsockfd, "Select a Room # or 'new': ", 26, 0);
+        if (recv(newsockfd, rbuf, 15, 0) <= 0)
+        {
+            close(newsockfd);
+            continue;
+        }
+        int room = -1;
+        int is_new_room = 0; //chatroom
+        if (!strncmp(rbuf, "new", 3) || rbuf[0] == '\n')
+        {
+            pthread_mutex_lock(&list_lock);
+            for (USR *c = head; c; c = c->next)
+                if (c->room >= room)
+                    room = c->room + 1;
+            pthread_mutex_unlock(&list_lock);
+            is_new_room = 1; //new chatroom created
+        }
+        else
+            room = atoi(rbuf);
+        if (room < 0)
+            room = 0;
 
-        // Print updated client list
-        pthread_mutex_lock(&client_list_mutex);
-        print_client_list();
-        pthread_mutex_unlock(&client_list_mutex);
+        /* ---------- build user node ---------- */
+        USR *u = calloc(1, sizeof(USR));
+        u->clisockfd = newsockfd;
+        u->addr = cli_addr;
+        strncpy(u->username, uname, 31);
+        u->colour = next_colour++ % NCOL;
+        u->room = room;
+        add_tail(u);
+        print_addr_list();
 
-        // prepare USR structure to pass client socket
-        USR *args = (USR *)malloc(sizeof(USR));
-        if (args == NULL)
-            error("ERROR creating thread argument");
+        if(is_new_room) // check for new chatroom
+        {
+            char notice[64];
+            snprintf(notice, sizeof(notice), "Connected to %s with new room number %d\n", inet_ntoa(cli_addr.sin_addr), room);
+            broadcast_room(room, -1, notice);
+        }
 
-        args->clisockfd = newsockfd;
-        args->cli_addr = cli_addr; //recommended addtion
-        strncpy(args->username, username, NAME_LEN);
-
+        /* ---------- spawn thread ---------- */
         pthread_t tid;
-        if (pthread_create(&tid, NULL, thread_main, (void *)args) != 0)
-            error("ERROR creating a new thread");
+        int *argfd = malloc(sizeof(int));
+        *argfd = newsockfd;
+        if (pthread_create(&tid, NULL, thread_main, argfd) != 0)
+            error("pthread_create");
     }
-
     return 0;
 }
-
-void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username)
-{
-    USR *new_node = (USR *)malloc(sizeof(USR));
-    //error check recommended to handle edge cases
-    if (!new_node)
-        error("ERROR allocating memory for client node");
-    
-    //recommened adding new nodes when a new client 
-    new_node->clisockfd = newclisockfd;
-    new_node->cli_addr = cliaddr;
-    strncpy(new_node->username, username, NAME_LEN);
-    new_node->username[NAME_LEN - 1] = '\0';
-    new_node->next = NULL;
-    
-    // Assign a color based on hash of username
-    int hash = 0;
-    for (int i = 0; username[i] != '\0'; ++i)
-        hash += username[i];
-    strncpy(new_node->color, colors[hash % NUM_COLORS], sizeof(new_node->color));
-
-    if (head == NULL)
-    {
-        head = tail = new_node;
-    }
-    else
-    {
-        tail->next = new_node;
-        tail = new_node;
-    }
-}
-
-void broadcast(int fromfd, char *message)
-{
-    // traverse through all connected clients
-    pthread_mutex_lock(&client_list_mutex);
-    USR *cur = head;
-    while (cur != NULL)
-    {
-        // Don't send message back to the sender (only if fromfd is not -1)
-        if (fromfd != -1 && cur->clisockfd != fromfd)
-        {
-            char buffer[512];
-            sprintf(buffer, "%s", message);
-
-            int nmsg = strlen(buffer);
-            int nsen = send(cur->clisockfd, buffer, nmsg, 0);
-            if (nsen != nmsg)
-                perror("ERROR send() failed");
-        }
-
-        // send message to all clients
-        if (fromfd == -1)
-        {
-            char buffer[512];
-            sprintf(buffer, "%s", message);
-
-            int nmsg = strlen(buffer);
-            int nsen = send(cur->clisockfd, buffer, nmsg, 0);
-            if (nsen != nmsg)
-                perror("ERROR send() failed");
-        }
-        cur = cur->next;
-    }
-    pthread_mutex_unlock(&client_list_mutex);
-}
-
-
-void *thread_main(void *args)
-{
-    // make sure thread resources are deallocated upon return
-    pthread_detach(pthread_self());
-
-    // get socket descriptor from argument
-    int clisockfd = ((USR *)args)->clisockfd;
-    struct sockaddr_in cli_addr = ((USR *)args)->cli_addr;
-    free(args);
-
-    //-------------------------------
-    // Now, we receive/send messages
-    char buffer[256];
-    int nrcv;
-
-    while ((nrcv = recv(clisockfd, buffer, 256, 0)) > 0)
-    {
-        buffer[nrcv] = '\0';
-
-        // Find sender in user list
-        pthread_mutex_lock(&client_list_mutex);
-        USR *cur = head;
-        while (cur != NULL && cur->clisockfd != clisockfd)
-            cur = cur->next;
-        pthread_mutex_unlock(&client_list_mutex);
-
-        if (cur != NULL)
-        {
-            char formatted[512];
-            snprintf(formatted, sizeof(formatted), "%s%s: %s%s", cur->color, cur->username, buffer, COLOR_RESET);
-
-            broadcast(clisockfd, formatted);
-        }
-    }
-
-    
-    if (nrcv < 0)
-        error("ERROR recv() failed");
-
-    char username[NAME_LEN];
-    strncpy(username, ((USR *)args)->username, NAME_LEN);
-    username[NAME_LEN - 1] = '\0'; 
-
-    shutdown(clisockfd, SHUT_RDWR);
-    close(clisockfd);
-
-    // Send leave message before removing from list
-    char leave_msg[256];
-    snprintf(leave_msg, sizeof(leave_msg), "[Server]: %s (%s) has left the chat!",
-            username, inet_ntoa(cli_addr.sin_addr));
-    broadcast(-1, leave_msg);
-
-    // Remove client from list
-    pthread_mutex_lock(&client_list_mutex);
-    USR *prev = NULL;
-    USR *cur = head;
-
-    while (cur != NULL)
-    {
-        if (cur->clisockfd == clisockfd)
-        {
-            if (prev == NULL)
-            { // head removal
-                head = cur->next;
-                if (cur == tail)
-                    tail = NULL;
-            }
-            else
-            {
-                prev->next = cur->next;
-                if (cur == tail)
-                    tail = prev;
-            }
-            free(cur);
-            break;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    pthread_mutex_unlock(&client_list_mutex);
-
-    pthread_mutex_lock(&client_list_mutex); //recommended additon
-    print_client_list();
-    pthread_mutex_unlock(&client_list_mutex);
-
-    return NULL;
-}
-
-void print_client_list()
-{
-    printf("=== Connected clients ===\n");
-    USR *cur = head;
-    while (cur != NULL)
-    {
-        printf("%s:%d\n", inet_ntoa(cur->cli_addr.sin_addr), ntohs(cur->cli_addr.sin_port));
-        cur = cur->next;
-    }
-    if (head == NULL)
-    {
-        printf("(no clients connected)\n");
-    }
-    printf("=========================\n");
-}
-
-void send_join_message(USR *new_user)
-{
-    // Format the join message
-    char join_msg[256];
-    snprintf(join_msg, sizeof(join_msg), "[Server]: %s (%s) has joined the chat!", new_user->username, inet_ntoa(new_user->cli_addr.sin_addr));
-
-    // Debug: Print the join message to ensure it's correct
-    printf("Join Message: %s\n", join_msg);
-
-    // Broadcast the message to all clients
-    broadcast(-1, join_msg);  // -1 indicates it's a system message (join)
-}
-
-void send_leave_message(USR *leaving_user)
-{
-    char leave_msg[256];
-    snprintf(leave_msg, sizeof(leave_msg), "[Server]: %s (%s) has left the chat!",
-             leaving_user->username, inet_ntoa(leaving_user->cli_addr.sin_addr));
-    broadcast(-1, leave_msg);
-}
-
-

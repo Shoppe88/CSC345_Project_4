@@ -98,7 +98,7 @@ void add_tail(int newclisockfd, struct sockaddr_in cliaddr)
     if (!new_node)
         error("ERROR allocating memory for client node");
 
-    // recommened adding new nodes when a new client
+    // AI recommened adding new nodes when a new client connects
     new_node->clisockfd = newclisockfd;
     new_node->cli_addr = cliaddr;
     new_node->next = NULL;

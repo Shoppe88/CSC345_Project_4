@@ -64,16 +64,11 @@ int main(int argc, char *argv[])
                                (struct sockaddr *)&cli_addr, &clen);
         if (newsockfd < 0)
             error("ERROR on accept");
-        pthread_mutex_lock(&client_list_mutex); // recommended addtion
-        add_tail(newsockfd, cli_addr);          // recommended addition
+        pthread_mutex_lock(&client_list_mutex); // AI recommended addition
+        add_tail(newsockfd, cli_addr);          // AI recommended addition
         pthread_mutex_unlock(&client_list_mutex);
 
         printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
-
-        // Print updated client list
-        pthread_mutex_lock(&client_list_mutex);
-        print_client_list();
-        pthread_mutex_unlock(&client_list_mutex);
 
         // prepare USR structure to pass client socket
         USR *args = (USR *)malloc(sizeof(USR));
@@ -81,7 +76,12 @@ int main(int argc, char *argv[])
             error("ERROR creating thread argument");
 
         args->clisockfd = newsockfd;
-        args->cli_addr = cli_addr; // recommended addtion
+        args->cli_addr = cli_addr; // AI recommended addition
+
+        // Print updated client list
+        pthread_mutex_lock(&client_list_mutex);
+        print_client_list();
+        pthread_mutex_unlock(&client_list_mutex);
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, thread_main, (void *)args) != 0)
@@ -143,20 +143,28 @@ void *thread_main(void *arg)
     pthread_detach(pthread_self());
 
     /* unwrap argument and look up our USR record */
-    USR  *aux   = (USR *)arg;
-    int   clisockfd = aux->clisockfd;
+    USR *aux = (USR *)arg;
+    int clisockfd = aux->clisockfd;
     free(aux);
 
     USR *self = find_user(clisockfd);
-    if(!self){ close(clisockfd); return NULL; }
+    if (!self)
+    {
+        close(clisockfd);
+        return NULL;
+    }
 
     /* ---------- username handshake ---------- */
     const char ask[] = "Enter username: ";
-    send(clisockfd, ask, sizeof(ask)-1, 0);
+    send(clisockfd, ask, sizeof(ask) - 1, 0);
 
     char uname[50] = {0};
-    int  n = recv(clisockfd, uname, sizeof(uname)-1, 0);
-    if(n <= 0){ close(clisockfd); return NULL; }
+    int n = recv(clisockfd, uname, sizeof(uname) - 1, 0);
+    if (n <= 0)
+    {
+        close(clisockfd);
+        return NULL;
+    }
 
     /* strip trailing CR/LF and store */
     uname[strcspn(uname, "\r\n")] = '\0';
@@ -170,14 +178,15 @@ void *thread_main(void *arg)
 
     /* ---------- chat loop ---------- */
     char buffer[256];
-    int  nrcv;
+    int nrcv;
 
-    while((nrcv = recv(clisockfd, buffer, sizeof buffer - 1, 0)) > 0)
+    while ((nrcv = recv(clisockfd, buffer, sizeof buffer - 1, 0)) > 0)
     {
         buffer[nrcv] = '\0';
         broadcast(clisockfd, buffer);
     }
-    if(nrcv < 0) perror("recv");
+    if (nrcv < 0)
+        perror("recv");
 
     /* announce leave */
     char leavemsg[128];
@@ -190,36 +199,41 @@ void *thread_main(void *arg)
 
     /* ---------- remove from list ---------- */
     pthread_mutex_lock(&client_list_mutex);
-    USR *prev=NULL,*cur=head;
-    while(cur){
-        if(cur->clisockfd == clisockfd){
-            if(prev) prev->next = cur->next; else head = cur->next;
-            if(cur == tail)      tail = prev;
+    USR *prev = NULL, *cur = head;
+    while (cur)
+    {
+        if (cur->clisockfd == clisockfd)
+        {
+            if (prev)
+                prev->next = cur->next;
+            else
+                head = cur->next;
+            if (cur == tail)
+                tail = prev;
             free(cur);
             break;
         }
-        prev = cur; cur = cur->next;
+        prev = cur;
+        cur = cur->next;
     }
-    print_client_list();               /* show new list while lock held   */
+    print_client_list(); /* show new list while lock held   */
     pthread_mutex_unlock(&client_list_mutex);
 
     return NULL;
 }
 
-
-
 void print_client_list(void)
 {
     printf("=== Connected clients ===\n");
-    for(USR *cur=head; cur; cur=cur->next)
+    for (USR *cur = head; cur; cur = cur->next)
         printf("%s:%d  %s\n",
                inet_ntoa(cur->cli_addr.sin_addr),
                ntohs(cur->cli_addr.sin_port),
                *cur->name ? cur->name : "(no‑name yet)");
-    if(!head) puts("(no clients connected)");
+    if (!head)
+        puts("(no clients connected)");
     puts("=========================");
 }
-
 
 static USR *find_user(int sock)
 {

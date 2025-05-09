@@ -22,62 +22,58 @@ typedef struct _ThreadArgs
     int clisockfd;
 } ThreadArgs;
 
-void *thread_main_recv(void *args)
+void* thread_main_recv(void* args)
 {
-    pthread_detach(pthread_self());
+	pthread_detach(pthread_self());
 
-    int sockfd = ((ThreadArgs *)args)->clisockfd;
-    free(args);
+	int sockfd = ((ThreadArgs*) args)->clisockfd;
+	free(args);
 
-    // keep receiving and displaying message from server
-    char buffer[512];
-    int n;
+	// keep receiving and displaying message from server
+	char buffer[512];
+	int n;
 
-    n = recv(sockfd, buffer, 512, 0);
-    while (n > 0)
-    {
-        memset(buffer, 0, 512);
-        n = recv(sockfd, buffer, 512, 0);
-        if (n < 0)
-            error("ERROR recv() failed");
+	n = recv(sockfd, buffer, 512, 0);
+	while (n > 0) {
+		memset(buffer, 0, 512);
+		n = recv(sockfd, buffer, 512, 0);
+		if (n < 0) error("ERROR recv() failed");
 
-        printf("\n%s\n", buffer);
-    }
+		printf("\n%s\n", buffer);
+	}
 
-    return NULL;
+	return NULL;
 }
 
-void *thread_main_send(void *args)
+void* thread_main_send(void* args)
 {
-    pthread_detach(pthread_self());
+	pthread_detach(pthread_self());
 
-    int sockfd = ((ThreadArgs *)args)->clisockfd;
-    free(args);
+	int sockfd = ((ThreadArgs*) args)->clisockfd;
+	free(args);
 
-    // keep sending messages to the server
-    char buffer[256];
-    int n;
+	// keep sending messages to the server
+	char buffer[256];
+	ssize_t n;
 
-    while (1)
-    {
-        // You will need a bit of control on your terminal
-        // console or GUI to have a nice input window.
-        // printf("\nPlease enter the message: ");
-        memset(buffer, 0, 256);
-        fgets(buffer, 255, stdin);
+	while (1) {
+        printf("\nPlease enter the message: ");
+        fflush(stdout);
+		// You will need a bit of control on your terminal
+		// console or GUI to have a nice input window.
+		//printf("\nPlease enter the message: ");
+		//memset(buffer, 0, 256);
+		fgets(buffer, 255, stdin);
 
-        if (strlen(buffer) == 1)
-            buffer[0] = '\0';
+		if (strlen(buffer) == 1) buffer[0] = '\0';
 
-        n = send(sockfd, buffer, strlen(buffer), 0);
-        if (n < 0)
-            error("ERROR writing to socket");
+		n = send(sockfd, buffer, strlen(buffer), 0);
+		if (n < 0) error("ERROR writing to socket");
 
-        if (n == 0)
-            break; // we stop transmission when user type empty string
-    }
+		if (n == 0) break; // we stop transmission when user type empty string
+	}
 
-    return NULL;
+	return NULL;
 }
 
 int main(int argc, char *argv[])

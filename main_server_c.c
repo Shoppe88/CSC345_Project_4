@@ -12,6 +12,24 @@
 #define MAX_CLIENTS 100
 #define NAME_LEN 50
 
+#define NUM_COLORS (sizeof(colors) / sizeof(colors[0]))
+#define COLOR_RESET "\033[0m"
+
+const char *colors[] = {
+    "\033[31m", // red
+    "\033[32m", // green
+    "\033[33m", // yellow
+    "\033[34m", // blue
+    "\033[35m", // magenta
+    "\033[36m", // cyan
+    "\033[91m", // light red
+    "\033[92m", // light green
+    "\033[93m", // light yellow
+    "\033[94m", // light blue
+    "\033[95m", // light magenta
+    "\033[96m", // light cyan
+};
+
 pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void error(const char *msg)
@@ -25,6 +43,7 @@ typedef struct _USR
     int clisockfd;
     struct sockaddr_in cli_addr; //added change
     char username[NAME_LEN]; // username
+    char color[16];  // ANSI color code string, e.g., "\033[31m"
     struct _USR *next;
 } USR;
 
@@ -119,6 +138,12 @@ void add_tail(int newclisockfd, struct sockaddr_in cliaddr, const char* username
     strncpy(new_node->username, username, NAME_LEN);
     new_node->username[NAME_LEN - 1] = '\0';
     new_node->next = NULL;
+    
+    // Assign a color based on hash of username
+    int hash = 0;
+    for (int i = 0; username[i] != '\0'; ++i)
+        hash += username[i];
+    strncpy(new_node->color, colors[hash % NUM_COLORS], sizeof(new_node->color));
 
     if (head == NULL)
     {
@@ -185,8 +210,24 @@ void *thread_main(void *args)
     while ((nrcv = recv(clisockfd, buffer, 256, 0)) > 0)
     {
         buffer[nrcv] = '\0';
-        broadcast(clisockfd, buffer);
+
+        // Find sender in user list
+        pthread_mutex_lock(&client_list_mutex);
+        USR *cur = head;
+        while (cur != NULL && cur->clisockfd != clisockfd)
+            cur = cur->next;
+        pthread_mutex_unlock(&client_list_mutex);
+
+        if (cur != NULL)
+        {
+            char formatted[512];
+            snprintf(formatted, sizeof(formatted), "%s%s: %s%s", cur->color, cur->username, buffer, COLOR_RESET);
+
+            broadcast(clisockfd, formatted);
+        }
     }
+
+    
     if (nrcv < 0)
         error("ERROR recv() failed");
 

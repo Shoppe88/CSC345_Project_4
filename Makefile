@@ -9,6 +9,9 @@ all:
 	gcc -o main_client_c main_client_s.c -lpthread
 	gcc -o main_server_c main_server_c.c -lpthread
 	gcc -o client_c client_c.c -lpthread
+	gcc -o main_server_t main_server_t.c -lpthread
+	gcc -o main_client main_client.c -lpthread
+	gcc -o main_server main_server.c -lpthread
 
 clean:
 	rm chat_server chat_client
@@ -19,4 +22,7 @@ clean:
 	rm main_client_t
 	rm main_server_c
 	rm client_c
+	rm main_server_t
+	rm main_client
+	rm main_server
 

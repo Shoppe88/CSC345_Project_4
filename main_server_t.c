@@ -8,260 +8,232 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
-#define PORT_NUM 5000   /* [AI] I was runnning into a lot of issues of not being able to get the server to run, so when i showed \
-                     AI my code it said, if I change the port number from 1004 to 5000 I should be able to run my server*/
-#define MAX_CLIENTS 100 // [AI] Added to set a limit for client list handling
+#define PORT_NUM 5000
+#define MAX_ROOMS 100	// [AI] Max allowed chat rooms
+#define MAX_CLIENTS 100  // [AI] Max allowed clients
 
-pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER; // [AI] Used for thread-safe client list access
+pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void error(const char *msg)
-{
-    perror(msg);
-    exit(1);
-}
-
-typedef struct _USR
-{
-    int clisockfd;     /* socket file descriptor */
-    struct _USR *next; /*for linked list queue */
-
-    /*Username and color*/
-    char name[50];
-    char color[10];
-    struct sockaddr_in addr; // [AI] Needed for printing client IP and join/leave announcements
+typedef struct _USR {
+	int clisockfd;
+	char name[50];
+	char color[10];
+	struct sockaddr_in addr;
+	int room_id;
+	struct _USR *next;
 } USR;
 
-USR *head = NULL;
-USR *tail = NULL;
+typedef struct _Room {
+	int room_id;
+	struct _Room *next;
+} Room;
 
-/* [AI] array of colors which the actual coded names of I recieved from AI */
+USR *head = NULL;
+Room *room_list = NULL;
+int next_room_id = 1;
+int active_rooms = 0;	// [AI] Tracks current active rooms
+int active_clients = 0;  // [AI] Tracks current active clients
+
 const char *colors[] = {
-    "\033[1;31m", "\033[1;32m", "\033[1;33m",
-    "\033[1;34m", "\033[1;35m", "\033[1;36m",
-    "\033[0;91m", "\033[0;92m", "\033[0;93m",
-    "\033[0;94m"};
+	"\033[1;31m", "\033[1;32m", "\033[1;33m",
+	"\033[1;34m", "\033[1;35m", "\033[1;36m",
+	"\033[0;91m", "\033[0;92m", "\033[0;93m",
+	"\033[0;94m"
+};
 int color_index = 0;
 
-void print_client_list() // [AI] Used to debug and visualize current connections
-{
-    printf("=== Connected clients ===\n");
-    USR *cur = head;
-    while (cur != NULL)
-    {
-        printf("%s:%d\n", inet_ntoa(cur->addr.sin_addr), ntohs(cur->addr.sin_port));
-        cur = cur->next;
-    }
-    if (head == NULL)
-    {
-        printf("(no clients connected)\n");
-    }
-    printf("=========================\n");
+void error(const char *msg) {
+	perror(msg);
+	exit(1);
 }
 
-void add_tail(int newclisockfd, struct sockaddr_in cli_addr)
-{
-    USR *new_node = (USR *)malloc(sizeof(USR));
-    if (!new_node)
-        error("ERROR allocating memory for client node");
-
-    new_node->clisockfd = newclisockfd;
-    new_node->addr = cli_addr;
-    snprintf(new_node->color, sizeof(new_node->color), "%s", colors[color_index++ % 10]); /*[AI] Assign rotating color to each user*/
-    new_node->next = NULL;
-
-    if (head == NULL)
-    {
-        head = tail = new_node;
-    }
-    else
-    {
-        tail->next = new_node;
-        tail = new_node;
-    }
+Room *find_or_create_room(const char *request) {
+	if (strncmp(request, "ROOM_REQUEST_NEW", 16) == 0) {
+    	if (active_rooms >= MAX_ROOMS) return NULL; // [AI] Enforces room limit
+    	Room *new_room = malloc(sizeof(Room));
+    	new_room->room_id = next_room_id++;
+    	new_room->next = room_list;
+    	room_list = new_room;
+    	active_rooms++; // [AI] Increment room count
+    	return new_room;
+	} else if (strncmp(request, "ROOM_REQUEST_JOIN:", 18) == 0) {
+    	int req_id = atoi(request + 18);
+    	Room *cur = room_list;
+    	while (cur) {
+        	if (cur->room_id == req_id) return cur;
+        	cur = cur->next;
+    	}
+    	return NULL;
+	}
+	return NULL;
 }
 
-void broadcast(int fromfd, char *message)
-{
-    pthread_mutex_lock(&client_list_mutex);
-
-    struct sockaddr_in cliaddr;
-    socklen_t clen = sizeof(cliaddr);
-    if (getpeername(fromfd, (struct sockaddr *)&cliaddr, &clen) < 0)
-        error("ERROR Unknown sender!");
-
-    USR *sender = head;
-    while (sender != NULL && sender->clisockfd != fromfd)
-        sender = sender->next;
-
-    USR *cur = head;
-    while (cur != NULL)
-    {
-        if (cur->clisockfd != fromfd)
-        {
-            char buffer[512];
-            if (sender && strlen(sender->name) > 0)
-                snprintf(buffer, sizeof(buffer), "%s[%s] %s\033[0m", sender->color, sender->name, message); /*[AI] Username + color formatting*/
-            else
-                snprintf(buffer, sizeof(buffer), "[%s]:%s", inet_ntoa(cliaddr.sin_addr), message);
-
-            int nmsg = strlen(buffer);
-            int nsen = send(cur->clisockfd, buffer, nmsg, 0);
-            if (nsen != nmsg)
-                perror("ERROR send() failed");
-        }
-        cur = cur->next;
-    }
-
-    pthread_mutex_unlock(&client_list_mutex);
+void print_client_list() {
+	printf("=== Connected Clients ===\n");
+	USR *cur = head;
+	while (cur) {
+    	printf("%s:%d (Room %d)\n", inet_ntoa(cur->addr.sin_addr), ntohs(cur->addr.sin_port), cur->room_id);
+    	cur = cur->next;
+	}
+	if (!head) printf("(no clients connected)\n");
+	printf("=========================\n");
 }
 
-typedef struct _ThreadArgs
-{
-    int clisockfd;
+void add_client(int clisockfd, struct sockaddr_in cli_addr, int room_id) {
+	if (active_clients >= MAX_CLIENTS) {  // [AI] Enforces max clients limit
+    	char msg[] = "Server is full. Connection refused.\n";
+    	send(clisockfd, msg, strlen(msg), 0);
+    	close(clisockfd);
+    	return;
+	}
+
+	USR *new_node = malloc(sizeof(USR));
+	new_node->clisockfd = clisockfd;
+	new_node->addr = cli_addr;
+	new_node->room_id = room_id;
+	snprintf(new_node->color, sizeof(new_node->color), "%s", colors[color_index++ % 10]);
+	new_node->next = head;
+	head = new_node;
+	active_clients++; // [AI] Increment active clients
+}
+
+void broadcast(int fromfd, int room_id, char *message) {
+	pthread_mutex_lock(&client_list_mutex);
+	USR *sender = head;
+	while (sender && sender->clisockfd != fromfd) sender = sender->next;
+
+	USR *cur = head;
+	while (cur) {
+    	if (cur->clisockfd != fromfd && cur->room_id == room_id) {
+        	char buffer[512];
+        	if (sender && strlen(sender->name) > 0)
+            	snprintf(buffer, sizeof(buffer), "%s[%s] %s\033[0m", sender->color, sender->name, message);
+        	else
+            	snprintf(buffer, sizeof(buffer), "[Unknown]: %s", message);
+
+        	send(cur->clisockfd, buffer, strlen(buffer), 0);
+    	}
+    	cur = cur->next;
+	}
+	pthread_mutex_unlock(&client_list_mutex);
+}
+
+typedef struct _ThreadArgs {
+	int clisockfd;
+	struct sockaddr_in cli_addr;
 } ThreadArgs;
 
-void *thread_main(void *args)
-{
-    pthread_detach(pthread_self());
+void *thread_main(void *args) {
+	pthread_detach(pthread_self());
+	int clisockfd = ((ThreadArgs *)args)->clisockfd;
+	struct sockaddr_in cli_addr = ((ThreadArgs *)args)->cli_addr;
+	free(args);
 
-    int clisockfd = ((ThreadArgs *)args)->clisockfd;
-    free(args);
+	char buffer[256];
+	int nrcv;
 
-    char buffer[256];
-    int nrcv;
-    int message_count = 0; /*[AI] Track how many messages a client sends before disconnecting*/
+	// [AI] Retry room joining if invalid, without closing connection
+	while (1) {
+    	memset(buffer, 0, sizeof(buffer));
+    	nrcv = recv(clisockfd, buffer, sizeof(buffer) - 1, 0);
+    	if (nrcv <= 0) {
+        	close(clisockfd);
+        	return NULL;
+    	}
 
-    pthread_mutex_lock(&client_list_mutex);
-    USR *self = head;
-    while (self != NULL && self->clisockfd != clisockfd)
-        self = self->next;
-    pthread_mutex_unlock(&client_list_mutex);
+    	Room *room = find_or_create_room(buffer);
+    	if (!room) {
+        	char deny_msg[] = "Invalid room number or server full. Try again.\n";
+        	send(clisockfd, deny_msg, strlen(deny_msg), 0);
+        	continue;  // [AI] Keeps connection open for retry
+    	}
 
-    if (self == NULL)
-    {
-        close(clisockfd);
-        return NULL; /*[AI] Prevent crash if client wasn't properly registered*/
-    }
+    	char room_msg[128];
+    	snprintf(room_msg, sizeof(room_msg), "Connected to room %d.\n", room->room_id);
+    	send(clisockfd, room_msg, strlen(room_msg), 0);
 
-    memset(self->name, 0, sizeof(self->name));
-    nrcv = recv(clisockfd, self->name, sizeof(self->name) - 1, 0);
+    	pthread_mutex_lock(&client_list_mutex);
+    	add_client(clisockfd, cli_addr, room->room_id);
+    	print_client_list();
+    	pthread_mutex_unlock(&client_list_mutex);
+    	break;  // [AI] Successfully joined, exit loop
+	}
 
-    if (nrcv <= 0)
-    {
-        close(clisockfd);
-        return NULL;
-    }
+	USR *self = head;
+	while (self && self->clisockfd != clisockfd) self = self->next;
 
-    char joinmsg[256];
-    snprintf(joinmsg, sizeof(joinmsg), "%s%s (%s) joined the chat room!\n\033[0m",
-             self->color, self->name, inet_ntoa(self->addr.sin_addr));
-    printf("%s", joinmsg);
-    broadcast(clisockfd, joinmsg);
+	if (!self) {
+    	close(clisockfd);
+    	return NULL;
+	}
 
-    while ((nrcv = recv(clisockfd, buffer, 255, 0)) > 0)
-    {
-        buffer[nrcv] = '\0';
-        broadcast(clisockfd, buffer);
-        message_count++;
-    }
+	memset(self->name, 0, sizeof(self->name));
+	recv(clisockfd, self->name, sizeof(self->name) - 1, 0);
 
-    if (nrcv < 0)
-        perror("ERROR recv() failed");
+	char joinmsg[256];
+	snprintf(joinmsg, sizeof(joinmsg), "%s%s (%s) joined the chat room!\n\033[0m", self->color, self->name, inet_ntoa(self->addr.sin_addr));
+	printf("%s", joinmsg);
+	broadcast(clisockfd, self->room_id, joinmsg);
 
-    if (message_count > 0)
-    {
-        char leavemsg[256];
-        snprintf(leavemsg, sizeof(leavemsg), "%s%s (%s) left the room!\n\033[0m",
-                 self->color, self->name, inet_ntoa(self->addr.sin_addr));
-        printf("%s", leavemsg);
-        broadcast(clisockfd, leavemsg);
-    }
+	while ((nrcv = recv(clisockfd, buffer, 255, 0)) > 0) {
+    	buffer[nrcv] = '\0';
+    	broadcast(clisockfd, self->room_id, buffer);
+	}
 
-    shutdown(clisockfd, SHUT_RDWR);
-    close(clisockfd);
+	char leavemsg[256];
+	snprintf(leavemsg, sizeof(leavemsg), "%s%s (%s) left the room!\n\033[0m", self->color, self->name, inet_ntoa(self->addr.sin_addr));
+	printf("%s", leavemsg);
+	broadcast(clisockfd, self->room_id, leavemsg);
+	close(clisockfd);
 
-    pthread_mutex_lock(&client_list_mutex);
-    USR *prev = NULL, *cur = head;
-    while (cur != NULL)
-    {
-        if (cur->clisockfd == clisockfd)
-        {
-            if (prev == NULL)
-            {
-                head = cur->next;
-                if (cur == tail)
-                    tail = NULL;
-            }
-            else
-            {
-                prev->next = cur->next;
-                if (cur == tail)
-                    tail = prev;
-            }
-            free(cur);
-            break;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    pthread_mutex_unlock(&client_list_mutex);
+	pthread_mutex_lock(&client_list_mutex);
+	USR *prev = NULL, *cur = head;
+	while (cur) {
+    	if (cur->clisockfd == clisockfd) {
+        	if (!prev) head = cur->next;
+        	else prev->next = cur->next;
+        	free(cur);
+        	active_clients--; // [AI] Decrement active clients
+        	break;
+    	}
+    	prev = cur;
+    	cur = cur->next;
+	}
+	print_client_list();
+	pthread_mutex_unlock(&client_list_mutex);
 
-    pthread_mutex_lock(&client_list_mutex);
-    print_client_list();
-    pthread_mutex_unlock(&client_list_mutex);
-
-    return NULL;
+	return NULL;
 }
 
-int main(int argc, char *argv[])
-{
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-        error("ERROR opening socket");
+int main() {
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0) error("ERROR opening socket");
 
-    struct sockaddr_in serv_addr;
-    socklen_t slen = sizeof(serv_addr);
-    memset((char *)&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(PORT_NUM);
+	int opt = 1;
+	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)); // [AI] Allows quick reuse of the port after termination
 
-    int status = bind(sockfd,
-                      (struct sockaddr *)&serv_addr, slen);
-    if (status < 0)
-        error("ERROR on binding");
+	struct sockaddr_in serv_addr;
+	memset(&serv_addr, 0, sizeof(serv_addr));
+	serv_addr.sin_family = AF_INET;
+	serv_addr.sin_addr.s_addr = INADDR_ANY;
+	serv_addr.sin_port = htons(PORT_NUM);
 
-    listen(sockfd, 5);
+	if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    	error("ERROR on binding");
 
-    while (1)
-    {
-        struct sockaddr_in cli_addr;
-        socklen_t clen = sizeof(cli_addr);
-        int newsockfd = accept(sockfd,
-                               (struct sockaddr *)&cli_addr, &clen);
-        if (newsockfd < 0)
-            error("ERROR on accept");
+	listen(sockfd, 5);
 
-        printf("Connected: %s\n", inet_ntoa(cli_addr.sin_addr));
+	while (1) {
+    	struct sockaddr_in cli_addr;
+    	socklen_t clen = sizeof(cli_addr);
+    	int newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clen);
+    	if (newsockfd < 0) error("ERROR on accept");
 
-        pthread_mutex_lock(&client_list_mutex);
-        add_tail(newsockfd, cli_addr);
-        pthread_mutex_unlock(&client_list_mutex);
+    	ThreadArgs *args = malloc(sizeof(ThreadArgs));
+    	args->clisockfd = newsockfd;
+    	args->cli_addr = cli_addr;
 
-        pthread_mutex_lock(&client_list_mutex);
-        print_client_list();
-        pthread_mutex_unlock(&client_list_mutex);
-
-        ThreadArgs *args = (ThreadArgs *)malloc(sizeof(ThreadArgs));
-        if (args == NULL)
-            error("ERROR creating thread argument");
-
-        args->clisockfd = newsockfd;
-
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, thread_main, (void *)args) != 0)
-            error("ERROR creating a new thread");
-    }
-
-    return 0;
+    	pthread_t tid;
+    	pthread_create(&tid, NULL, thread_main, (void *)args);
+	}
 }

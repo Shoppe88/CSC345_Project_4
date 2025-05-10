@@ -1,3 +1,5 @@
+// CLIENT
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -8,157 +10,207 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <pthread.h>
-#include <signal.h> /*[AI] For signal handling to prevent abrupt termination*/
+#include <signal.h>
 
-#define PORT_NUM 5000 /* [AI] was running into issues running the server, ai reccomemded I increase the port number when I brought up the problem*/
+#define PORT_NUM 5000
 
-/*[AI] When I would press Ctrl+C to exit the client or when the server disconnects, my threads kept on crashing unpredictably. So I wanted
-an optimal way I can control the shutdown safely, so it recommended I use "a shared gloabal flag" like below on line 17 */
 volatile int keep_running = 1;
 
 void handle_sigint(int sig)
 {
-    keep_running = 0; /*[AI] suggested handler function that ties into the AI use below on line 91*/
+	keep_running = 0; // [AI] Graceful shutdown on Ctrl+C
 }
 
 void error(const char *msg)
 {
-    perror(msg);
-    exit(0);
+	perror(msg);
+	exit(0);
 }
 
 typedef struct _ThreadArgs
 {
-    int clisockfd;
+	int clisockfd;
 } ThreadArgs;
 
 void *thread_main_recv(void *args)
 {
-    pthread_detach(pthread_self());
+	pthread_detach(pthread_self());
+	int sockfd = ((ThreadArgs *)args)->clisockfd;
+	free(args);
 
-    int sockfd = ((ThreadArgs *)args)->clisockfd;
-    free(args);
+	char buffer[512];
+	int n;
 
-    char buffer[512];
-    int n;
+	while (keep_running && (n = recv(sockfd, buffer, 512, 0)) > 0)
+	{
+    	buffer[n] = '\0';
+    	printf("%s\n", buffer);
+	}
 
-    /*[AI] Due to some odd behavior fromm the terminal after recieving messages like, cutting off, corruption, or other garbage characters, the AI
-    recomended to use the followig while loop which, inside has line 44, which makes sure to null-terminate the buffer, to guarentee that the
-    string ends where it is supposed to*/
-    while (keep_running && (n = recv(sockfd, buffer, 512, 0)) > 0)
-    {
-        buffer[n] = '\0';
-        printf("%s\n", buffer);
-    }
+	if (n == 0)
+	{
+    	printf("Server closed the connection.\n");
+    	exit(0);
+	}
+	if (n < 0)
+    	error("ERROR recv() failed");
 
-    if (n == 0)
-    {
-        printf("Server closed the connection.\n"); /*informing user of shut down*/
-        exit(0);
-    }
-
-    if (n < 0)
-        error("ERROR recv() failed");
-
-    return NULL;
+	return NULL;
 }
 
 void *thread_main_send(void *args)
 {
-    pthread_detach(pthread_self());
+	pthread_detach(pthread_self());
+	int sockfd = ((ThreadArgs *)args)->clisockfd;
+	free(args);
 
-    int sockfd = ((ThreadArgs *)args)->clisockfd;
-    free(args);
+	char buffer[256];
+	int n;
 
-    char buffer[256];
-    int n;
+	while (keep_running)
+	{
+    	memset(buffer, 0, 256);
+    	if (fgets(buffer, 255, stdin) == NULL)
+    	{
+        	shutdown(sockfd, SHUT_WR);
+        	break;
+    	}
 
-    while (keep_running)
-    {
-        memset(buffer, 0, 256);
-        if (fgets(buffer, 255, stdin) == NULL)
-        {
-            shutdown(sockfd, SHUT_WR); /*[AI] recommendation*/
-        }
+    	buffer[strcspn(buffer, "\n")] = '\0';
 
-        buffer[strcspn(buffer, "\n")] = '\0'; /*Trimming newline*/
+    	if (strlen(buffer) == 0)
+    	{
+        	printf("Empty input detected. Do you want to leave the chat? (y/n): ");
+        	char choice;
+        	scanf(" %c", &choice);
+        	getchar(); // [AI] Clear input buffer
+        	if (choice == 'y' || choice == 'Y')
+        	{
+            	printf("Leaving chat.\n");
+            	shutdown(sockfd, SHUT_RDWR);
+            	close(sockfd);
+            	exit(0);
+        	}
+        	continue;
+    	}
 
-        /*message for someone leaving the chat*/
-        if (strlen(buffer) == 0)
-        {
-            printf("Empty input detected. Leaving chat.\n");
-            shutdown(sockfd, SHUT_RDWR);
-            close(sockfd);
-            exit(0); /*[AI] suggested that I exit immediately due to some server crashing issues I was runnning into*/
-        }
-
-        n = send(sockfd, buffer, strlen(buffer), 0);
-        if (n < 0)
-            error("ERROR writing to socket");
-    }
-
-    return NULL;
+    	n = send(sockfd, buffer, strlen(buffer), 0);
+    	if (n < 0)
+        	error("ERROR writing to socket");
+	}
+	return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-    signal(SIGINT, handle_sigint); /*[AI] I was also running into a issue of when using Ctrl+C, the program would instantly dissconect and wouldn't have time to send
-                                     any leaving message, so to counter that, it suggested I catch the SIGINT using signal(), and use the signal handler function
-                                     it recommended above: handle_sigint*/
+	signal(SIGINT, handle_sigint); // [AI] Catch Ctrl+C for graceful shutdown
 
-    if (argc < 2)
-        error("Please speicify hostname");
+	if (argc < 2)
+	{
+    	printf("Usage: ./main_client_cp3 <server-ip> [room#|new]\n");
+    	exit(1);
+	}
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-        error("ERROR opening socket");
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0)
+    	error("ERROR opening socket");
 
-    struct sockaddr_in serv_addr;
-    socklen_t slen = sizeof(serv_addr);
-    memset((char *)&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = inet_addr(argv[1]);
-    serv_addr.sin_port = htons(PORT_NUM);
+	struct sockaddr_in serv_addr;
+	socklen_t slen = sizeof(serv_addr);
+	memset(&serv_addr, 0, sizeof(serv_addr));
+	serv_addr.sin_family = AF_INET;
+	serv_addr.sin_addr.s_addr = inet_addr(argv[1]);
+	serv_addr.sin_port = htons(PORT_NUM);
 
-    printf("Try connecting to %s...\n", inet_ntoa(serv_addr.sin_addr));
+	printf("Connecting to %s...\n", inet_ntoa(serv_addr.sin_addr));
 
-    int status = connect(sockfd, (struct sockaddr *)&serv_addr, slen);
-    if (status < 0)
-        error("ERROR connecting");
+	if (connect(sockfd, (struct sockaddr *)&serv_addr, slen) < 0)
+    	error("ERROR connecting");
 
-    char username[50]; /*[AI] I asked ai what a safe number I could use here would be, it gave me the option of 50
-                         it explained that it provides a very good upper bound for any name while not taking up
-                         much memory - which is why i used 50*/
-    do
-    {
-        printf("Type your user name: ");
-        fgets(username, sizeof(username), stdin);
-        username[strcspn(username, "\n")] = '\0';
-    } while (strlen(username) == 0); // [AI] Prevent sending empty username
+	// [AI] Handle room selection
+	if (argc == 2)
+	{
+    	// No room specified, request available rooms from server
+    	char msg[] = "ROOM_REQUEST_LIST";
+    	send(sockfd, msg, strlen(msg), 0);
 
-    send(sockfd, username, strlen(username), 0);
+    	char response[1024];
+    	memset(response, 0, sizeof(response));
+    	recv(sockfd, response, sizeof(response) - 1, 0);
+    	printf("%s", response); // Display list of rooms
 
-    printf("%s (%s) joined the chat room!\n", username, argv[1]);
+    	char choice[10];
+    	printf("Choose the room number or type [new] to create a new room: ");
+    	fgets(choice, sizeof(choice), stdin);
+    	choice[strcspn(choice, "\n")] = '\0';
 
-    pthread_t tid1;
-    pthread_t tid2;
+    	if (strcmp(choice, "new") == 0)
+    	{
+        	char create_msg[] = "ROOM_REQUEST_NEW";
+        	send(sockfd, create_msg, strlen(create_msg), 0);
+    	}
+    	else
+    	{
+        	char join_msg[64];
+        	snprintf(join_msg, sizeof(join_msg), "ROOM_REQUEST_JOIN:%s", choice);
+        	send(sockfd, join_msg, strlen(join_msg), 0);
+    	}
+	}
+	else
+	{
+    	// Room specified via command-line
+    	if (strcmp(argv[2], "new") == 0)
+    	{
+        	char msg[] = "ROOM_REQUEST_NEW";
+        	send(sockfd, msg, strlen(msg), 0);
+    	}
+    	else
+    	{
+        	char room_request[64];
+        	snprintf(room_request, sizeof(room_request), "ROOM_REQUEST_JOIN:%s", argv[2]);
+        	send(sockfd, room_request, strlen(room_request), 0);
+    	}
+	}
 
-    ThreadArgs *args;
+	// [AI] Read server response confirming room connection
+	char response[128];
+	memset(response, 0, sizeof(response));
+	recv(sockfd, response, sizeof(response) - 1, 0);
+	printf("%s\n", response);
 
-    /*[AI] I started to run into issues with my code closing immediately after one message, and some clients were disconnecting when a user would
-    send a message, so when given my skeleton code and told about the problems I was running into, it suggested I went with this approach below
-    suggesting I use two seperate threads for input and output which will avoid any blocks that were occuring in my code.*/
-    args = (ThreadArgs *)malloc(sizeof(ThreadArgs));
-    args->clisockfd = sockfd;
-    pthread_create(&tid1, NULL, thread_main_send, (void *)args);
+	if (strstr(response, "Invalid") != NULL)
+	{
+    	printf("Failed to join room. Exiting.\n");
+    	close(sockfd);
+    	exit(1);
+	}
 
-    args = (ThreadArgs *)malloc(sizeof(ThreadArgs));
-    args->clisockfd = sockfd;
-    pthread_create(&tid2, NULL, thread_main_recv, (void *)args);
+	// [AI] Prompt for username
+	char username[50];
+	do
+	{
+    	printf("Type your user name: ");
+    	fgets(username, sizeof(username), stdin);
+    	username[strcspn(username, "\n")] = '\0';
+	} while (strlen(username) == 0);
 
-    pthread_join(tid1, NULL);
-    /*----------------------------------------------------------------------------------------------------*/
-    close(sockfd);
+	send(sockfd, username, strlen(username), 0);
 
-    return 0;
+	printf("%s (%s) joined the chat room!\n", username, inet_ntoa(serv_addr.sin_addr));
+
+	pthread_t tid1, tid2;
+	ThreadArgs *args;
+
+	args = malloc(sizeof(ThreadArgs));
+	args->clisockfd = sockfd;
+	pthread_create(&tid1, NULL, thread_main_send, (void *)args);
+
+	args = malloc(sizeof(ThreadArgs));
+	args->clisockfd = sockfd;
+	pthread_create(&tid2, NULL, thread_main_recv, (void *)args);
+
+	pthread_join(tid1, NULL);
+
+	close(sockfd);
+	return 0;
 }

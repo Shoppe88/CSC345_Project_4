@@ -51,7 +51,7 @@ void error(const char *msg)
     exit(1);
 }
 
-Room *find_or_create_room(const char *request)
+Room *find_or_create_room(const char *request, int *is_new_room)
 {
     if (strncmp(request, "ROOM_REQUEST_NEW", 16) == 0)
     {
@@ -62,6 +62,7 @@ Room *find_or_create_room(const char *request)
         new_room->next = room_list;
         room_list = new_room;
         active_rooms++; // [AI] Increment room count
+        *is_new_room = 1;
         return new_room;
     }
     else if (strncmp(request, "ROOM_REQUEST_JOIN:", 18) == 0)
@@ -70,8 +71,10 @@ Room *find_or_create_room(const char *request)
         Room *cur = room_list;
         while (cur)
         {
-            if (cur->room_id == req_id)
+            if (cur->room_id == req_id){
+                *is_new_room = 0;
                 return cur;
+            }
             cur = cur->next;
         }
         return NULL;
@@ -154,6 +157,7 @@ void *thread_main(void *args)
     char buffer[256];
     int nrcv;
 
+    int is_new_room = 0;
     while (1)
     {
         memset(buffer, 0, sizeof(buffer));
@@ -196,7 +200,7 @@ void *thread_main(void *args)
             continue; // [AI] Continue waiting for user selection
         }
 
-        Room *room = find_or_create_room(buffer);
+        Room *room = find_or_create_room(buffer, &is_new_room);
         if (!room)
         {
             char deny_msg[] = "Invalid room number or server full. Try again.\n";
@@ -227,6 +231,15 @@ void *thread_main(void *args)
 
     memset(self->name, 0, sizeof(self->name));
     recv(clisockfd, self->name, sizeof(self->name) - 1, 0);
+
+    if (is_new_room) {
+        char room_announcement[256];
+        snprintf(room_announcement, sizeof(room_announcement),
+                "%s%s created the chat room %d!\n\033[0m", self->color, self->name, self->room_id);
+        printf("%s", room_announcement);
+        broadcast(clisockfd, self->room_id, room_announcement);
+        send(clisockfd, room_announcement, strlen(room_announcement), 0);
+    }
 
     char joinmsg[256];
     snprintf(joinmsg, sizeof(joinmsg), "%s%s (%s) joined the chat room!\n\033[0m", self->color, self->name, inet_ntoa(self->addr.sin_addr));
